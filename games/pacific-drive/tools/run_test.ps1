@@ -5,7 +5,7 @@ param(
     [string]$Name = "test",
     [string]$Map = "/Game/Maps/RunProto/RB_Garage",
     [int]$Seconds = 240,
-    [ValidateSet("car", "travel", "gametravel")][string]$Scenario = "car"
+    [ValidateSet("car", "rejoincar", "travel", "gametravel")][string]$Scenario = "car"
 )
 $root = "C:\PDCoop"
 $bin = "PenDriverPro\Binaries\Win64"
@@ -62,7 +62,7 @@ $checks["client walking moves its character on the host (>=3 distinct positions)
 $hostPos = @($clientLines | ForEach-Object { Get-Pos $_ "PDP_MainCharacter_C:\d+\[none\|role=1\|([-\d,]+)" } | Where-Object { $_ } | Select-Object -Unique)
 $checks["host movement visible on client (>=2 distinct positions)"] = $hostPos.Count -ge 2
 $hostLog = "$out\client1-UE4SS.log"; $clientLog = "$out\client2-UE4SS.log"
-if ($Scenario -eq "car") {
+if ($Scenario -in @("car", "rejoincar")) {
 # car: host drives, client rides
 $hostLog = "$out\client1-UE4SS.log"; $clientLog = "$out\client2-UE4SS.log"
 $checks["client SEAT command reached host and seated the passenger"] = [bool](Select-String -Path $hostLog -Pattern "\] SEAT .* attached to BP_PlayerCarNew_C" -Quiet)
@@ -78,6 +78,21 @@ $carPos = @($ride | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Ob
 $checks["client sees the car move while riding (>=3 distinct car positions, got $($carPos.Count))"] = $carPos.Count -ge 3
 $gap = if ($ride.Count) { ($ride | ForEach-Object { [int]$_.Matches[0].Groups[2].Value } | Measure-Object -Maximum).Maximum } else { 99999 }
 $checks["passenger stays with the car on the client (max char-to-car $gap uu < 400)"] = $gap -lt 400
+}
+if ($Scenario -eq "rejoincar") {
+    $checks["client dropped out on purpose while riding"] = [bool](Select-String -Path $clientLog -Pattern "DROPTEST riding" -Quiet)
+    $checks["client rejoined the host in RB_Garage"] = [bool](Select-String -Path $clientLog -Pattern "REJOIN back in RB_Garage" -Quiet)
+    $checks["host seated the re-joined player straight into the driven car"] = [bool](Select-String -Path $hostLog -Pattern "SPAWN host is driving: seating" -Quiet)
+    $lines = @(Get-Content $clientLog)
+    $idx = -1; for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match "REJOIN back in") { $idx = $i; break } }
+    $post = @(); if ($idx -ge 0) { $post = @($lines[$idx..($lines.Count - 1)] | Where-Object { $_ -match "RIDE parent=BP_PlayerCarNew_C\S* charLoc=\S+ carLoc=(\S+) charToCar=(\d+)" }) }
+    $postPos = @($post | ForEach-Object { [regex]::Match($_, "carLoc=(\S+)").Groups[1].Value } | Select-Object -Unique)
+    $postGap = if ($post.Count) { ($post | ForEach-Object { [int][regex]::Match($_, "charToCar=(\d+)").Groups[1].Value } | Measure-Object -Maximum).Maximum } else { 99999 }
+    $checks["after rejoin the client rides in the car ($($post.Count) samples, $($postPos.Count) car positions)"] = ($post.Count -ge 3) -and ($postPos.Count -ge 3)
+    $checks["after rejoin the passenger stays with the car (max $postGap uu < 400)"] = $postGap -lt 400
+    Write-Output "===== REJOINCAR events"
+    Select-String -Path $hostLog -Pattern "\] (SPAWN|SEAT|PRETRAVEL)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
+    Select-String -Path $clientLog -Pattern "\] (DROPTEST|REJOIN|RIDE riding|MAPCHANGE)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
 }
 if ($Scenario -eq "gametravel") {
     $hostEv = @(Select-String -Path $hostLog -Pattern "\] (GAMETRAVEL|REHOST|MAPCHANGE)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) })

@@ -367,3 +367,24 @@ SKIP for `gametravel` in tools/run_test.ps1 from now on. Client rejoined after 2
   client keeps the server's replicated attachment and only disables its movement and the car's physics.
 - exp18 "car", 300 s: **16/16 PASS**, passenger-to-car distance on the client 83 then a constant 67 uu,
   car driven by throttle (max 3241 uu from start).
+
+### Rejoin while the host is driving (owner requirement: a re-joining player appears next to the host)
+- Scenario `rejoincar`: the client rides as passenger, disconnects itself (`disconnect`) after 40 s of riding,
+  rejoins via the retry loop; the host spawns the new character 320 uu beside the car it is driving and seats
+  it straight away.
+- exp19 (19/21): one client sample at the seat moment had the kinematic car at a bogus position (Z 2845);
+  fixed by putting the car on `ReplicatedMovement` in the same frame as the kinematic switch. The car later
+  stopped on the host; exp20 diagnostics (`chassisSim=true awake=false`, stuck at the garage's far wall)
+  show this is the test bot pushing the car into a wall until its body sleeps, not a co-op issue.
+  The dropped passenger's character leaves the car's attached actors on logout.
+- exp20 "rejoincar", 420 s: **21/21 PASS**:
+```
+PASS  client dropped out on purpose while riding
+PASS  client rejoined the host in RB_Garage
+PASS  host seated the re-joined player straight into the driven car
+PASS  after rejoin the client rides in the car (39 samples, 17 car positions)
+PASS  after rejoin the passenger stays with the car (max 69 uu < 400)
+(+ the 16 car checks, all PASS; max passenger-to-car distance before the drop 70 uu)
+```
+- Host log: `SPAWNED ... at -3367,-1580,207 next to BP_PlayerCarNew_C (-3210,-1858,147)` then
+  `SPAWN host is driving: seating ... as passenger`.
