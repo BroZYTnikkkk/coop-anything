@@ -5,9 +5,17 @@ param(
     [string]$Name = "test",
     [string]$Map = "/Game/Maps/RunProto/RB_Garage",
     [int]$Seconds = 240,
-    [ValidateSet("car", "rejoincar", "travel", "gametravel")][string]$Scenario = "car"
+    [ValidateSet("play", "car", "rejoincar", "travel", "gametravel")][string]$Scenario = "car",
+    # folder that holds client1 and client2 (two copies of the game with UE4SS)
+    [string]$Root = "C:\PDCoop",
+    # mod source; defaults to ..\mod next to this script (repo layout), else <Root>\mods-src
+    [string]$ModSource = ""
 )
-$root = "C:\PDCoop"
+$root = $Root
+if (-not $ModSource) {
+    $ModSource = Join-Path $PSScriptRoot "..\mod\PDCoopNet\Scripts\main.lua"
+    if (-not (Test-Path $ModSource)) { $ModSource = Join-Path $root "mods-src\PDCoopNet\Scripts\main.lua" }
+}
 $bin = "PenDriverPro\Binaries\Win64"
 $roles = @{ client1 = "host`n$Map`n$Scenario"; client2 = "client`n127.0.0.1:7777`n$Scenario" }
 
@@ -15,7 +23,7 @@ Get-Process PenDriverPro-Win64-Shipping -ErrorAction SilentlyContinue | Stop-Pro
 Start-Sleep 2
 foreach ($c in "client1", "client2") {
     $mod = Join-Path $root "$c\$bin\ue4ss\Mods\PDCoopNet"
-    Copy-Item "$root\mods-src\PDCoopNet\Scripts\main.lua" "$mod\Scripts\main.lua" -Force
+    Copy-Item $ModSource "$mod\Scripts\main.lua" -Force
     Set-Content -Encoding ascii "$mod\role.txt" $roles[$c]
     Remove-Item (Join-Path $root "$c\$bin\ue4ss\UE4SS.log") -ErrorAction SilentlyContinue
 }
@@ -90,6 +98,14 @@ if ($Scenario -eq "rejoincar") {
     $postGap = if ($post.Count) { ($post | ForEach-Object { [int][regex]::Match($_, "charToCar=(\d+)").Groups[1].Value } | Measure-Object -Maximum).Maximum } else { 99999 }
     $checks["after rejoin the client rides in the car ($($post.Count) samples, $($postPos.Count) car positions)"] = ($post.Count -ge 3) -and ($postPos.Count -ge 3)
     $checks["after rejoin the passenger stays with the car (max $postGap uu < 400)"] = $postGap -lt 400
+    # getting out: client asks (UNSEAT), host detaches, client walks again and the host sees it move
+    $checks["host detached the passenger on UNSEAT"] = [bool](Select-String -Path $hostLog -Pattern "\] UNSEAT .* detached from BP_PlayerCarNew_C.*parent=nil" -Quiet)
+    $checks["client left the car and walks again"] = [bool](Select-String -Path $clientLog -Pattern "RIDE left the car, walking" -Quiet)
+    $hl = @(Get-Content $hostLog); $u = -1
+    for ($i = 0; $i -lt $hl.Count; $i++) { if ($hl[$i] -match "\] UNSEAT ") { $u = $i; break } }
+    $walkPos = @()
+    if ($u -ge 0) { $walkPos = @($hl[$u..($hl.Count - 1)] | ForEach-Object { [regex]::Match($_, "PDP_MainCharacter_C:\d+\[remote\|role=3\|([-\d,]+)\]").Groups[1].Value } | Where-Object { $_ } | Select-Object -Unique) }
+    $checks["after getting out the client's character moves on the host ($($walkPos.Count) positions)"] = $walkPos.Count -ge 3
     Write-Output "===== REJOINCAR events"
     Select-String -Path $hostLog -Pattern "\] (SPAWN|SEAT|PRETRAVEL)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
     Select-String -Path $clientLog -Pattern "\] (DROPTEST|REJOIN|RIDE riding|MAPCHANGE)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }

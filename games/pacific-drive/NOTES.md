@@ -388,3 +388,19 @@ PASS  after rejoin the passenger stays with the car (max 69 uu < 400)
 ```
 - Host log: `SPAWNED ... at -3367,-1580,207 next to BP_PlayerCarNew_C (-3210,-1858,147)` then
   `SPAWN host is driving: seating ... as passenger`.
+
+## Session 2026-10-19 — Stage 5: playable build, own repo
+
+- Mod repository (MIT, no game files): https://github.com/BroZYTnikkkk/pacific-drive-coop (v0.1, commit e645cbf).
+  `um publish check` against the clean Steam install: `PASS: 9 files, 0 failures, 0 warnings`
+  (against the test copy it flagged the mod itself as a "game file", because the test copy has the mod installed).
+- New `play` scenario (default): no test bots. Keys: host F8 = host the current map; client F8 = connect,
+  F6 = sit in the car, F7 = get out. **The key bindings were not pressed in any test**; the tests run the same
+  actions from bots. exp23 smoke run in `play`: both instances load the mod, no bot actions, no Lua errors.
+- Get out of the car: client sends `UNSEAT`; host detaches the character next to the car and sets walking.
+- Command channel fix: `PlayerState:SetPlayerName` did not clear the command name (exp21: every command ran again
+  every 5 s); the host now acts once per distinct `PDCOOP:<cmd>:<seq>` string per controller.
+- Client applies the server's `AttachmentReplication` offset in the frame the ride starts (exp21 had one sample
+  with the passenger at a bogus position at attach time).
+- exp22 "rejoincar", 480 s: **24/24 PASS** (car 16 + rejoin 5 + get out 3: host detached the passenger on UNSEAT,
+  client left the car and walks again, its character moves on the host in 5 positions).
