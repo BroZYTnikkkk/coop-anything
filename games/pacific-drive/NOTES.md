@@ -436,3 +436,45 @@ PASS  after rejoin the passenger stays with the car (max 69 uu < 400)
   while loading the main menu after the host left; not seen in exp25-exp28; cause unknown).
 - exp27 gametravel 15/15 (2 n/a); exp28 rejoincar 24/25 as printed; the one FAIL was the test's own pattern
   (log text changed to "SPAWN host is in <car>: seating"); the host log shows the event, so 25/25 with the fixed pattern.
+
+## Session 2026-10-19 — Assets: what the game ships for a second player (mod v0.3, commit fd8a48c)
+
+### Tooling
+- `tools/assetdump` (C#, .NET 10 SDK, NuGet `UAssetAPI` 1.1.0 by atenfyr, repo commit 73530811): cooked
+  .uasset+.uexp → JSON with the UE4SS `.usmap` (unversioned properties). `tools/assetinfo.py` summarizes the JSON
+  (components, meshes, materials, transforms). Assets extracted with tools/pakextract.py. UAssetGUI v1.1.0 was not
+  used: it needs the .NET Desktop Runtime 10 (only 6 installed) and its `tojson` mappings-path argument is v1.1.1+.
+
+### Observations (from the dumps)
+- `PDP_MainCharacter_C.CharacterMesh0`: `SkeletalMesh=Mannequin` (`/Game/AdvancedLocomotionV3/Characters/Mannequin`),
+  `AnimClass=Mannequin_AnimBP_C`, `OverrideMaterials=[M_PlayerCharacter_Invist, M_PlayerCharacter_Invist]`,
+  `CastShadow=False`. So the player body is the ALS mannequin made invisible; nobody ever sees a player body in
+  single player. Cameras: `FP_Camera` (first person), `TP_Camera`, a `FirstPersonSkelMeshTransform` scene component.
+- The Mannequin's own materials are not in the paks (only `Materials/Textures/uvsnap`).
+- Skeletal meshes in all paks: 9; the only human ones are `SK_Firstperson` (5.6 KB uexp, an attach rig, no visible
+  body) and the ALS `Mannequin`. Pak index has no seat/sit/enter-car animation names; entering the car is
+  `EnterCarTimeline` transform curves.
+- `BP_PlayerCarNew`: one seat `TempSocket_Seat` at (26.6, -45.8, -15.6); interaction only on the driver's door
+  `UICollision_EnterDriverDoor` (57.8, -91.8, 30.6); `ExitPoint` (-15.2, -151.1, 0); `TempExitLocation`
+  (-49.3, -168.2, 13.8). `SLOT_FrontLeft/FrontRight/RearLeft/RearRightDoor` and `SLOT_BackSeatLeft/Right` are
+  car-part slots (doors and back-seat parts such as `BP_CarPart_FuelTank_Base_Backseat`, `BACKSEAT-RACK`), not seats.
+
+### Derived
+- The car is a four-door wagon modelled for one occupant. A front passenger seat can be the mirror of the
+  driver's seat (Y +45.8); rear seats would need positions chosen by hand and can collide with back-seat parts.
+- Making other players visible needs no new asset: give the mannequin any material from the paks.
+  A real player model and a sitting pose would be new assets (skeletal mesh, animations), which need the editor.
+
+### What the mod does now
+- Every machine replaces the invisible material on *other* players' characters with
+  `/Engine/EngineMaterials/DefaultMaterial` and turns their shadow on; your own body stays invisible.
+- Passenger seat moved from +70 uu to the mirrored seat (+91.6 uu to the car's right of the driver's seat) in both
+  the seat hook and the mod's own seating.
+- tests: `HighResShot 1` screenshots, copied to results/<run>/shot-*.png.
+
+### exp29 "rejoincar", 480 s: 25/25 PASS, no crash
+- Host screenshot (host driving, camera turned to the passenger): a dark grey checkered figure in front of the
+  centre console = player 2's mannequin, standing pose (no sitting animation), large in frame.
+- Client screenshot (riding): the view looks into the car interior with brown blotches over the image, likely the
+  camera inside glass/geometry with a dirt effect. Passenger camera placement is not handled yet.
+- The "player 2 walking" screenshot did not trigger (timing condition), so a walking body was not seen yet.
