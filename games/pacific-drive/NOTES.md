@@ -404,3 +404,35 @@ PASS  after rejoin the passenger stays with the car (max 69 uu < 400)
   with the passenger at a bogus position at attach time).
 - exp22 "rejoincar", 480 s: **24/24 PASS** (car 16 + rejoin 5 + get out 3: host detached the passenger on UNSEAT,
   client left the car and walks again, its character moves on the host in 5 positions).
+
+### Correction (2026-10-19): exp13 also crashed the host
+- Three `CrashReportClient` windows were still open on the owner's screen after the runs. Crash contexts:
+  client2 08:52 `EXCEPTION_ACCESS_VIOLATION reading address 0x000000000000000d` (exp9, UE4SS worker-thread loops);
+  client1 09:59 `... 0x0000000000000020` (exp14, QuitToMenu from RB_Garage); client1 09:56 `... 0x0000000000000020`,
+  i.e. **exp13 crashed the host on QuitToMenu from Wilderness_Forest_01 as well**. Earlier text saying the zone
+  QuitToMenu "worked" is wrong: the test harness did not look for crashes after the checks it had.
+- Same address as exp14, so the cause is most likely the same (a second PDP_MainCharacter during world teardown);
+  no crash reporter appeared in exp15/exp16 with the pre-travel cleanup.
+- tools/run_test.ps1 now records crash folders created during the run, closes the test copies'
+  CrashReportClient processes by PID (nothing is sent), keeps the dumps under results/<run>/ and fails a
+  "no game crash" check.
+
+### Owner report: "start of the game, two cars inside each other" (v0.2, mod repo commit d878523)
+- The new-game intro uses another car class, `BP_PlayerCar_Intro_C` (both derive from `ABaseNewCar`); the
+  client's duplicate filter only knew `BP_PlayerCarNew_C`. Survey in exp25: `CLIENT-LOCAL REPLICATED ACTORS: BP_PlayerCar_Intro_C=1`,
+  client had role 3 at -59029,64602 and role 1 at -58942,64602. Fix: all car logic uses `FindAllOf("BaseNewCar")`
+  (UE4SS FindAllOf includes subclasses) and `IsA(/Script/PenDriverPro.BaseNewCar)`; a local copy is removed only if
+  the host replicates the same class. exp26: duplicate removed, 1 car on the client.
+- Same map: the intro starts with the player seated; after possession the game put player 2 into the driver's
+  seat on top of the host (host-side distance 0 uu, exp26), although the mod had seated it as passenger.
+  The game takes the seat from `PDP_MainCharacter_C.GetCarAttachTransformForCharacter(out FTransform)` (used by
+  `EnterCarTimeline`), and asks for it every frame while seated. A UE4SS post-hook on that Blueprint function that
+  moves the out transform 70 uu to the car's right for player 2 works (`transformParam:set()` on the out param
+  changes what the game uses). exp27: player 2 at 70 uu from the host, 15/15; a host-side keeper (re-seat when
+  player 2 is within 40 uu of the host while the host is in a car) never fired there; in exp28 it fired once
+  while the host was getting into the car.
+- Also new: tools/run_test.ps1 fails a "no game crash" check (exp24 caught a client crash
+  `Runnable thread RHIThread crashed`, `EXCEPTION_ACCESS_VIOLATION 0x000001daef0c67d0`, call stack in game code
+  while loading the main menu after the host left; not seen in exp25-exp28; cause unknown).
+- exp27 gametravel 15/15 (2 n/a); exp28 rejoincar 24/25 as printed; the one FAIL was the test's own pattern
+  (log text changed to "SPAWN host is in <car>: seating"); the host log shows the event, so 25/25 with the fixed pattern.
