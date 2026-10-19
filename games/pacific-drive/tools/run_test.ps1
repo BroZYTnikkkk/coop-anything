@@ -60,6 +60,22 @@ $remote = @($hostLines | ForEach-Object { Get-Pos $_ "PDP_MainCharacter_C:\d+\[r
 $checks["client walking moves its character on the host (>=3 distinct positions)"] = $remote.Count -ge 3
 $hostPos = @($clientLines | ForEach-Object { Get-Pos $_ "PDP_MainCharacter_C:\d+\[none\|role=1\|([-\d,]+)" } | Where-Object { $_ } | Select-Object -Unique)
 $checks["host movement visible on client (>=2 distinct positions)"] = $hostPos.Count -ge 2
+# car: host drives, client rides
+$hostLog = "$out\client1-UE4SS.log"; $clientLog = "$out\client2-UE4SS.log"
+$checks["client SEAT command reached host and seated the passenger"] = [bool](Select-String -Path $hostLog -Pattern "\] SEAT .* attached to BP_PlayerCarNew_C" -Quiet)
+$checks["host is driving the car (host possesses car)"] = [bool](Select-String -Path $hostLog -Pattern "DRIVE t=.*hostPossessesCar=true" -Quiet)
+$moved = @(Select-String -Path $hostLog -Pattern "DRIVE t=\d+ mode=(\w+) .*movedFromStart=(\d+)" | ForEach-Object { [int]$_.Matches[0].Groups[2].Value })
+$maxMoved = if ($moved.Count) { ($moved | Measure-Object -Maximum).Maximum } else { 0 }
+$mode = (Select-String -Path $hostLog -Pattern "DRIVE t=\d+ mode=(\w+)" | Select-Object -Last 1 | ForEach-Object { $_.Matches[0].Groups[1].Value })
+$checks["car moved on host > 500 uu (max $maxMoved, mode=$mode)"] = $maxMoved -gt 500
+$checks["host sees remote character attached to the car"] = [bool](Select-String -Path $hostLog -Pattern "PDP_MainCharacter_C:\d+\[remote\|role=3\|[^\]]*\|att=" -Quiet)
+$ride = @(Select-String -Path $clientLog -Pattern "RIDE parent=BP_PlayerCarNew_C\S* charLoc=\S+ carLoc=(\S+) charToCar=(\d+)")
+$checks["client character attached to the car on the client"] = $ride.Count -gt 0
+$carPos = @($ride | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -Unique)
+$checks["client sees the car move while riding (>=3 distinct car positions, got $($carPos.Count))"] = $carPos.Count -ge 3
+$gap = if ($ride.Count) { ($ride | ForEach-Object { [int]$_.Matches[0].Groups[2].Value } | Measure-Object -Maximum).Maximum } else { 99999 }
+$checks["passenger stays with the car on the client (max char-to-car $gap uu < 400)"] = $gap -lt 400
+
 $pass = 0
 Write-Output "===== CHECKS"
 foreach ($k in $checks.Keys) {
@@ -70,7 +86,7 @@ Write-Output "SUMMARY: $pass/$($checks.Count) checks passed"
 
 foreach ($c in "client1", "client2") {
     Write-Output "===== $c events"
-    Select-String -Path "$out\$c-UE4SS.log" -Pattern "PDCoopNet\] (GAMEMODE|SPAWN|DEDUPE|client |host |CLIENT-LOCAL|.* error:)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
+    Select-String -Path "$out\$c-UE4SS.log" -Pattern "PDCoopNet\] (GAMEMODE|SPAWN|DEDUPE|client |host |CLIENT-LOCAL|SEAT|CMD|DRIVE|.* error:)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
     Write-Output "===== $c last status"
     Select-String -Path "$out\$c-UE4SS.log" -Pattern "PDNET\|" | Select-Object -Last 3 | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
     Write-Output "===== $c engine errors (net/player/fatal)"

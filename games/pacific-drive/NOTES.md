@@ -222,3 +222,72 @@ checks passing.
 - Anything a human sees: camera, HUD, animation of the remote character, interaction/inventory for player 2.
 - Entering/driving the car with two players, car physics on the client, leaving the garage for a run
   (level travel), saves, internet play.
+
+## Session 2026-10-19 — Stage 3: host drives, client rides as passenger (PDCoopNet v3)
+
+### How it works now
+- Client -> host command channel without new RPCs: the client calls the stock reliable Server RPC
+  `PlayerController.ServerChangeName("PDCOOP:SEAT")`; the host reads remote `PlayerState` names every 5 s,
+  acts on the `PDCOOP:` prefix and then renames the player ("Passenger").
+- Host on `SEAT`: `CharacterMovement:DisableMovement()`, collision off, teleport the remote character to
+  `TempSocket_Seat` + 70 uu to the car's right, `K2_AttachToActor(car, None, KeepWorld x3)`. Attachment replicates.
+- Host bot drive: `PDP_MainCharacter_C.CommandEnterCar(true, nil, false)` (called as a UFunction object: the
+  managers only have a *delegate* of that name, `cm:CommandEnterCar()` hits the delegate and fails with
+  `attempt to call a MulticastDelegateProperty value`), then fallbacks (driver door highlight event,
+  `PlayerController:Possess(car)` + `BP_CarManager_C."Register Car Possessed"(true)`),
+  `ManualSetIgnition_NoAnim(2)`, `ManualActivate_Gearbox(...)`, `VehicleController:SetParkingBrakeActive(false)`,
+  then every frame `AccelerateBrake(dir)`, `DriveControl(dir)`, `VehicleController.ThrottleInput = dir`
+  (forward 4 s / back 4 s). `car:SetReplicateMovement(true)` on the host.
+- Client when attached: own CharacterMovement disabled and its tick off, collision off, re-seated at the same
+  seat point and re-attached locally; the replicated car's `Chassis` made kinematic and its
+  `VehicleController` tick off; every frame the client sets the car transform from `car.ReplicatedMovement`
+  (Location/Rotation). The host is the only physics simulation of the car.
+- All mod loops run on the game thread (`LoopInGameThreadWithDelay`, `ExecuteInGameThreadWithDelay`).
+
+### Observations
+- exp8: with the client still simulating the replicated car's physics, the car on the client jittered
+  (Z 95..280 while the host car was flat) and the passenger-to-car distance on the client ranged 36..699 uu,
+  while on the host it was a constant 36 uu.
+- exp9: client crash `EXCEPTION_ACCESS_VIOLATION reading address 0x000000000000000d`, call stack entirely inside
+  `UE4SS.dll`, a few seconds after the client got its character, before any car code ran on the client.
+  The client code on that path was the same as in the passing exp8. Suspected cause: `LoopAsync(16)` loops
+  (run on a UE4SS worker thread) touching the Lua state / UObjects while the game thread also ran mod code.
+  After moving every loop to the game thread: no crash in exp10 and exp11. Not proven, one run each.
+- exp10: making the client's replicated car kinematic stopped it moving on the client (physics replication
+  only drives simulating bodies). Following `ReplicatedMovement` by hand fixed it (exp11).
+- Gearbox: with `ManualActivate_Gearbox(1)` and throttle the car did not move in 10 s; after
+  `ManualActivate_Gearbox(0)` it drove (moved 2335 uu within the next 5 s). The garage start state was 0.
+  Derived: `CarGearBoxState` 0 = drive, 1 = park (enum names in the dump are only NewEnumerator0/1).
+- `CommandEnterCar` on the character returned without error, but 2.5 s later the host did not possess the car;
+  possession came from the `Possess` fallback at 5 s. Whether the real enter sequence (timeline,
+  dip to black) just needs longer: unknown.
+
+### Automated test — run "exp11-car4", 300 s, 2026-10-19
+```
+PASS  client connected to host (serverConn=yes)
+PASS  host has 2 PlayerControllers
+PASS  client possesses own PDP_MainCharacter (local, role=2)
+PASS  client sees host character (role=1)
+PASS  host sees remote PDP_MainCharacter
+PASS  client has exactly one player car
+PASS  client car is the replicated one (role=1)
+PASS  client walking moves its character on the host (>=3 distinct positions)
+PASS  host movement visible on client (>=2 distinct positions)
+PASS  client SEAT command reached host and seated the passenger
+PASS  host is driving the car (host possesses car)
+PASS  car moved on host > 500 uu (max 3510, mode=throttle)
+PASS  host sees remote character attached to the car
+PASS  client character attached to the car on the client
+PASS  client sees the car move while riding (>=3 distinct car positions, got 24)
+PASS  passenger stays with the car on the client (max char-to-car 67 uu < 400)
+SUMMARY: 16/16 checks passed
+```
+History: exp8 14/16 (no host entry, client jitter), exp9 7/16 (client crash in UE4SS.dll), exp10 15/16
+(kinematic car frozen on client), exp11 16/16.
+
+### Not verified
+- Visuals: passenger pose (no sitting animation is triggered), cameras, how smooth the car looks on the client
+  (transform is set per frame from replicated movement, no interpolation), car sounds on the client.
+- Real player input for driving (the bot calls the input handlers directly), the proper enter-car sequence,
+  getting out of the car (passenger detach is not implemented), more than one passenger.
+- Level travel out of the garage, saves, internet play.
