@@ -108,3 +108,62 @@
 3. Probe car: `NewVehiclePawn` properties, whether bReplicates / ReplicateMovement can be forced.
 4. Quick alternative to evaluate: UE local split screen (`GameMapsSettings.bUseSplitscreen` +
    `GameplayStatics.CreatePlayer`, UE4SS SplitScreenMod) + Steam Remote Play Together.
+
+## Session 2026-10-19 — Phase 3/Stage 2: engine listen server experiments
+
+### Setup (observations)
+- `client2`: 82 files hardlinked from `client1` (paks, Engine), `PenDriverPro/Binaries/Win64` copied
+  (own UE4SS config, logs and mods). Disk cost of client2 is only the Binaries folder.
+- Per-instance settings: `-NotInstalled` on the command line makes the shipping build write
+  `Saved/` into `<instance>/PenDriverPro/Saved` instead of `%LOCALAPPDATA%/PenDriverPro/Saved`.
+  Checked: the instance folder gets `Config/` and `Logs/`, and `%LOCALAPPDATA%/PenDriverPro` got no new
+  writes during any `-NotInstalled` run. Where SaveGames go under `-NotInstalled`: unknown (no save made yet).
+- Two instances of the Steam build run at the same time on one PC with Steam running (no mutex block seen).
+- Pak index: pak v11, not encrypted, compression Zlib. `tools/paklist.py` / `tools/pakextract.py`
+  (kept locally, small pure-Python) list and extract files. 70,547 files in pakchunk0.
+- `DefaultEngine.ini`: no NetDriverDefinitions override (engine default IpNetDriver),
+  `GameDefaultMap=/Game/Maps/RunProto/RB_MainMenu`, `GlobalDefaultGameMode=/Game/Systems/GameModes/BP_DrivingGameMode`,
+  `GameInstanceClass=/Script/PenDriverPro.DrivingGameInstance`, `bUseSplitscreen=False`,
+  `TwoPlayerSplitscreenLayout=Vertical`. Hub map: `/Game/Maps/RunProto/RB_Garage`.
+- Test mod `PDCoopNet` (Lua, UE4SS): role file per instance; host runs `open <map>?listen` at +40 s,
+  client runs `open 127.0.0.1:7777` at +90 s; both log a `PDNET|` status line every 5 s; host teleports
+  its own pawn ±150 uu every 5 s so the client can check movement replication.
+
+### Experiment 1: main menu map (`RB_MainMenu?listen`) — ran, PASS
+- Host: `standalone=false`, IpNetDriver created, listening on 7777.
+- Client log: `Welcomed by server (Level: /Game/Maps/RunProto/RB_MainMenu, Game: .../BP_MainMenuGamemode_C)`;
+  host log: `Join succeeded`.
+- Host: 2 PlayerControllers, a second `DefaultPawn` owned by the remote PC.
+- Client: own DefaultPawn is AutonomousProxy (role 2); host DefaultPawn is SimulatedProxy (role 1) and its
+  X position alternates 0 / -150 in step with the host nudges, so movement replication works.
+- `LogNetVersion: PenDriverPro 1.15.0 ... EngineNetVer: 17, GameNetVer: 0` on both sides.
+
+### Experiment 2: hub map (`RB_Garage?listen`) — ran, PARTIAL
+- Host loads RB_Garage as listen server with no save loaded; spawns `PDP_MainCharacter_C` (player) and
+  `BP_PlayerCarNew_C` (car). Client joins (`Join succeeded`) and loads RB_Garage.
+- Host character replicates to the client: `PDP_MainCharacter_C` role 1 on the client, X alternates
+  3046 / 3196 with the host nudges.
+- The car replicates as an actor (client sees `BP_PlayerCarNew_C` role 1 at the host's position), **but the
+  client also has its own local car** (`BP_PlayerCarNew_C` role 3, ~2 uu away): level/Blueprint spawn logic runs
+  on the client too, so there are two cars on the client.
+- **The joining player gets no character**: host has 2 PCs but only its own `PDP_MainCharacter_C`; the client
+  only has a local `SpectatorPawn`. The game mode spawns the character for the first player only.
+- Host log error on join: `LogPlayerController: Error: EnableInput can only be specified on a PlayerController for itself`.
+- Client log: many content errors, e.g. missing DLC package `/PDFeature_Fig/.../BP_Fig_Mission_Chapter08`
+  requested by `AEntitlementSpawner`, DataTable `Missing RowStruct` on RoadSplineActors (also on host).
+
+### Derived
+- Engine replication is a working base: connection, travel, Character movement and actor replication
+  all work without native patches. Co-op can be built "the UE way" from a UE4SS mod.
+- Work items, in order: (1) spawn and possess a `PDP_MainCharacter_C` for each joining PC on the host
+  (hook game mode PostLogin / HandleStartingNewPlayer); (2) stop client-side duplicate spawns (car, world
+  actors) — run spawner logic on authority only, or destroy non-replicated duplicates on clients;
+  (3) car: physics is IWCarPhysics (custom, no replication) → host-authoritative car with replicated
+  transform/velocity, client as passenger first; (4) inventory, loot, car parts, damage via RPCs/replicated
+  state; (5) saves on host only; (6) Steam transport for internet play (no SteamNetDriver in the build;
+  options: IpNetDriver + port forward/VPN first, a Steam sockets driver later).
+
+### Unknowns
+- Whether `PDP_MainCharacter_C` controls (interaction, inventory UI) work for a non-first player.
+- Whether running a real save/run (not a raw `open`) keeps the listen server alive across level travel
+  (runs load new maps; needs seamless/server travel with clients following).
