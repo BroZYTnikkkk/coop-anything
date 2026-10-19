@@ -291,3 +291,79 @@ History: exp8 14/16 (no host entry, client jitter), exp9 7/16 (client crash in U
 - Real player input for driving (the bot calls the input handlers directly), the proper enter-car sequence,
   getting out of the car (passenger detach is not implemented), more than one passenger.
 - Level travel out of the garage, saves, internet play.
+
+## Session 2026-10-19 — Stage 4: map changes (ServerTravel, the game's own travel, re-host, rejoin)
+
+### Tooling
+- universal-modder skills installed for the owner (12 skills) and its `um` CLI 0.2.0, pinned to commit
+  `6a8865ae171b406f50892c7f46fc5f45655269eb` (`uv tool install git+...@<sha>`), code read before install.
+  `um scan <test dir>/client1`: Unreal Engine `UE4+Release-4.27`, no anti-cheat found, loader UE4SS. Matches triage.
+  `um kb search "pacific drive"`: no note yet.
+
+### Observations
+- How the game changes maps: native C++ in `UBaseLevelManager` (delegates `OnPreTravel`/`OnPostTravel` with a
+  `UMapLocation`), route logic in `UBaseRouteState::TravelTo(UBaseLegState*, ERouteEndReason) -> FString`
+  (BlueprintCallable + BlueprintNativeEvent, so UE4SS `RegisterHook` sees every call). The actual map load does
+  not go through hookable UFunctions: during the game's `QuitToMenu` none of the hooks on `GameplayStatics:OpenLevel`,
+  `DrivingGameInstance:PreLoadMap/PostLoadMapWithWorld` or `PlayerController:ClientTravel` fired on the host;
+  the host log shows `Browse: /Game/Maps/RunProto/RB_MainMenu` with no `?listen`. Result: the game's own travel
+  shuts the listen server down (`World NetDriver shutdown`) and clients get `Host closed the connection`.
+- Host `servertravel /Game/Maps/Wilderness/Forest/Wilderness_Forest_01` from RB_Garage: the client receives
+  `ClientTravelInternal("/Game/Maps/Wilderness/Forest/Wilderness_Forest_01?listen", TRAVEL_Relative, false)`.
+  exp12: client `ConnectionTimeout` after 20 s while the host loaded the zone (19.2 s, started 4 s late).
+  exp13: client followed, got its own character there, 14/14 checks (host load 14.5 s that time, so whether the
+  timeout change mattered is unknown).
+- Setting `InitialConnectTimeout`/`ConnectionTimeout` on the IpNetDriver/NetDriver CDOs and on the live pending
+  driver right after `open` does not change the pending-connect threshold: still `Threshold: 20` (exp15, exp16).
+  Cause unknown. Retrying the `open` every 30 s works instead.
+- Host crash, exp14: game's `QuitToMenu` from RB_Garage with a second `PDP_MainCharacter_C` present →
+  `EXCEPTION_ACCESS_VIOLATION reading address 0x20` in game code right after `World NetDriver shutdown` during
+  `BeginTearingDown for /Game/Maps/RunProto/RB_Garage`. With a pre-hook on `BaseSaveGameManager:QuitToMenu`
+  that unpossesses and destroys remote players' characters first: no crash (exp15, exp16).
+- `BaseSaveGameManager.UserNewGame(5, STORY)` (on `BP_SaveGameManager_C`) travels natively to
+  `/Game/Maps/Narrative/Narrative_Forest_OlympicOpening_Sentry_01/...`. Saves go to the instance's own `Saved/`
+  under `-NotInstalled`; the exe has no Steam Remote Storage calls (no `SteamRemoteStorage` strings).
+
+### What the mod does now
+- Host "re-host": if the host lands standalone in a gameplay map after having had clients, it runs
+  `servertravel <same map>?listen` (one extra load).
+- Pre-hooks on `QuitToMenu` and `BaseRouteState:TravelTo` remove remote players' characters before native travel.
+- Client "rejoin": after dropping from a gameplay map to the menu it retries `open <host>` every 30 s until it is
+  in a gameplay map again.
+- Spawn rule (owner's requirement): a joining or re-joining player is always spawned next to what the host
+  controls now (250 uu beside the host character, 320 uu beside the car), never at a saved position, a
+  player start or the garage. If the host is driving, the new player is seated as a passenger right away
+  (not tested yet).
+- Per-map state of the mod resets on every map change.
+
+### Automated test — run "exp16-gametravel3", 480 s
+```
+PASS  client connected to host (serverConn=yes)
+PASS  host has 2 PlayerControllers
+PASS  client possesses own PDP_MainCharacter (local, role=2)
+PASS  client sees host character (role=1)
+PASS  host sees remote PDP_MainCharacter
+PASS  client has exactly one player car
+PASS  client car is the replicated one (role=1)
+PASS  game's own UserNewGame travelled the host to a gameplay map (Narrative_Forest_OlympicOpening_Sentry_01)
+PASS  host re-hosted that map with ?listen
+PASS  client rejoined the host in the new map
+PASS  client has its own character there (local, role=2)
+PASS  re-joined player spawned next to the host (first distance 250 uu < 800)
+```
+The two walking checks failed in that run because this scenario leaves the garage after ~20 s; they are marked
+SKIP for `gametravel` in tools/run_test.ps1 from now on. Client rejoined after 2 tries.
+
+### Not tested
+- A real run travel (garage gateway → zone → zone → garage) triggered by gameplay; `TravelTo` hook has not fired yet.
+- Seating a re-joined player directly into the car when the host is driving.
+- Cost of the re-host double load on long zone maps; whether reloading a run map breaks run state.
+- Anything visual.
+
+### Car regression after the travel changes
+- exp17 (14/16): the passenger rode along on the client at a constant 16506 uu from the car. The client's local
+  re-seat (detach, teleport to seat socket, re-attach KeepWorld) read the car at (-15233,-9001,9669) in the frame
+  where its chassis was switched to kinematic, so the attach offset was wrong. Removed the local re-seat; the
+  client keeps the server's replicated attachment and only disables its movement and the car's physics.
+- exp18 "car", 300 s: **16/16 PASS**, passenger-to-car distance on the client 83 then a constant 67 uu,
+  car driven by throttle (max 3241 uu from start).

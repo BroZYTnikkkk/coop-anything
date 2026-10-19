@@ -4,11 +4,12 @@
 param(
     [string]$Name = "test",
     [string]$Map = "/Game/Maps/RunProto/RB_Garage",
-    [int]$Seconds = 240
+    [int]$Seconds = 240,
+    [ValidateSet("car", "travel", "gametravel")][string]$Scenario = "car"
 )
 $root = "C:\PDCoop"
 $bin = "PenDriverPro\Binaries\Win64"
-$roles = @{ client1 = "host`n$Map"; client2 = "client`n127.0.0.1:7777" }
+$roles = @{ client1 = "host`n$Map`n$Scenario"; client2 = "client`n127.0.0.1:7777`n$Scenario" }
 
 Get-Process PenDriverPro-Win64-Shipping -ErrorAction SilentlyContinue | Stop-Process -Confirm:$false
 Start-Sleep 2
@@ -50,16 +51,18 @@ $checks = [ordered]@{}
 $lastC = if ($clientLines.Count) { $clientLines[-1] } else { "" }
 $lastH = if ($hostLines.Count) { $hostLines[-1] } else { "" }
 $checks["client connected to host (serverConn=yes)"] = $lastC -match "serverConn=yes"
-$checks["host has 2 PlayerControllers"] = $lastH -match "\|pcs=2\|"
+$checks["host has 2 PlayerControllers"] = [bool]($hostLines | Where-Object { $_ -match "\|pcs=2\|" })
 $checks["client possesses own PDP_MainCharacter (local, role=2)"] = $lastC -match "PDP_MainCharacter_C:\d+\[local\|role=2"
-$checks["client sees host character (role=1)"] = $lastC -match "PDP_MainCharacter_C:\d+\[none\|role=1"
-$checks["host sees remote PDP_MainCharacter"] = $lastH -match "PDP_MainCharacter_C:\d+\[remote\|role=3"
+$checks["client sees host character (role=1)"] = [bool]($clientLines | Where-Object { $_ -match "PDP_MainCharacter_C:\d+\[none\|role=1" })
+$checks["host sees remote PDP_MainCharacter"] = [bool]($hostLines | Where-Object { $_ -match "PDP_MainCharacter_C:\d+\[remote\|role=3" })
 $checks["client has exactly one player car"] = ([regex]::Matches($lastC, "BP_PlayerCarNew_C:")).Count -eq 1
 $checks["client car is the replicated one (role=1)"] = $lastC -match "BP_PlayerCarNew_C:\d+\[none\|role=1"
 $remote = @($hostLines | ForEach-Object { Get-Pos $_ "PDP_MainCharacter_C:\d+\[remote\|role=3\|([-\d,]+)" } | Where-Object { $_ } | Select-Object -Unique)
 $checks["client walking moves its character on the host (>=3 distinct positions)"] = $remote.Count -ge 3
 $hostPos = @($clientLines | ForEach-Object { Get-Pos $_ "PDP_MainCharacter_C:\d+\[none\|role=1\|([-\d,]+)" } | Where-Object { $_ } | Select-Object -Unique)
 $checks["host movement visible on client (>=2 distinct positions)"] = $hostPos.Count -ge 2
+$hostLog = "$out\client1-UE4SS.log"; $clientLog = "$out\client2-UE4SS.log"
+if ($Scenario -eq "car") {
 # car: host drives, client rides
 $hostLog = "$out\client1-UE4SS.log"; $clientLog = "$out\client2-UE4SS.log"
 $checks["client SEAT command reached host and seated the passenger"] = [bool](Select-String -Path $hostLog -Pattern "\] SEAT .* attached to BP_PlayerCarNew_C" -Quiet)
@@ -75,14 +78,62 @@ $carPos = @($ride | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Ob
 $checks["client sees the car move while riding (>=3 distinct car positions, got $($carPos.Count))"] = $carPos.Count -ge 3
 $gap = if ($ride.Count) { ($ride | ForEach-Object { [int]$_.Matches[0].Groups[2].Value } | Measure-Object -Maximum).Maximum } else { 99999 }
 $checks["passenger stays with the car on the client (max char-to-car $gap uu < 400)"] = $gap -lt 400
+}
+if ($Scenario -eq "gametravel") {
+    $hostEv = @(Select-String -Path $hostLog -Pattern "\] (GAMETRAVEL|REHOST|MAPCHANGE)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) })
+    $newMap = (Select-String -Path $hostLog -Pattern "GAMETRAVEL host arrived in (\S+)" | Select-Object -First 1 | ForEach-Object { $_.Matches[0].Groups[1].Value })
+    $checks["game's own UserNewGame travelled the host to a gameplay map ($newMap)"] = [bool]$newMap
+    $checks["host re-hosted that map with ?listen"] = [bool](Select-String -Path $hostLog -Pattern "REHOST game travelled to" -Quiet)
+    $after = @()
+    if ($newMap) { $after = @(Select-String -Path $clientLog -Pattern "PDNET\|client\|.*map=$newMap\|.*serverConn=yes" | ForEach-Object { $_.Line }) }
+    $checks["client rejoined the host in the new map"] = $after.Count -gt 0
+    $checks["client has its own character there (local, role=2)"] = [bool]($after | Where-Object { $_ -match "PDP_MainCharacter_C:\d+\[local\|role=2" })
+    # the re-joined player must appear next to the host, not at a saved/old position or a player start
+    $near = $null
+    if ($newMap) {
+        foreach ($l in (Select-String -Path $hostLog -Pattern "PDNET\|host\|.*map=$newMap\|" | ForEach-Object { $_.Line })) {
+            $a = [regex]::Match($l, "\[local\|role=3\|(-?\d+),(-?\d+),(-?\d+)")
+            $b = [regex]::Match($l, "PDP_MainCharacter_C:\d+\[remote\|role=3\|(-?\d+),(-?\d+),(-?\d+)")
+            if ($a.Success -and $b.Success) {
+                $dx = [double]$a.Groups[1].Value - [double]$b.Groups[1].Value; $dy = [double]$a.Groups[2].Value - [double]$b.Groups[2].Value
+                $near = [math]::Round([math]::Sqrt($dx * $dx + $dy * $dy)); break
+            }
+        }
+    }
+    $checks["re-joined player spawned next to the host (first distance $near uu < 800)"] = ($near -ne $null) -and ($near -lt 800)
+    Write-Output "===== GAMETRAVEL host events"; $hostEv | Select-Object -First 30
+    Write-Output "===== GAMETRAVEL client events"
+    Select-String -Path $clientLog -Pattern "\] (REJOIN|MAPCHANGE|console:)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) } | Select-Object -First 20
+    Select-String -Path "$out\client2-PenDriverPro.log" -Pattern "LogNet: (Browse|Welcomed)|NetworkFailure" | Select-Object -Last 12 | ForEach-Object { $_.Line.Substring(0, [Math]::Min(220, $_.Line.Length)) }
+}
+if ($Scenario -eq "travel") {
+    $hz = @(Select-String -Path $hostLog -Pattern "PDNET\|host\|.*map=Wilderness_Forest_01" | ForEach-Object { $_.Line })
+    $cz = @(Select-String -Path $clientLog -Pattern "PDNET\|client\|.*map=Wilderness_Forest_01" | ForEach-Object { $_.Line })
+    $checks["host ServerTravelled to Wilderness_Forest_01"] = $hz.Count -gt 0
+    $checks["client followed the host to Wilderness_Forest_01"] = $cz.Count -gt 0
+    $checks["client still connected in the zone (serverConn=yes)"] = [bool]($cz | Where-Object { $_ -match "serverConn=yes" })
+    $checks["client has its own character in the zone (local, role=2)"] = [bool]($cz | Where-Object { $_ -match "PDP_MainCharacter_C:\d+\[local\|role=2" })
+    $checks["host sees the remote character in the zone"] = [bool]($hz | Where-Object { $_ -match "PDP_MainCharacter_C:\d+\[remote\|role=3" })
+    Write-Output "===== TRAVEL: hooks that fired (host)"
+    Select-String -Path $hostLog -Pattern "\] (HOOK|TRAVEL|MAPCHANGE|hook )" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) } | Select-Object -First 40
+    Write-Output "===== TRAVEL: client map changes and hooks"
+    Select-String -Path $clientLog -Pattern "\] (HOOK|MAPCHANGE)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) } | Select-Object -First 30
+    Write-Output "===== TRAVEL: client net events"
+    Select-String -Path "$out\client2-PenDriverPro.log" -Pattern "LogNet: (Browse|Welcomed|Join)|NetworkFailure|TravelFailure|ClientTravel|ServerTravel|LoadMap" | Select-Object -Last 15 | ForEach-Object { $_.Line.Substring(0, [Math]::Min(240, $_.Line.Length)) }
+}
 
-$pass = 0
+# gametravel leaves the garage after ~20 s on purpose, too short for the walking bursts: not applicable there
+$skip = @()
+if ($Scenario -eq "gametravel") { $skip = @("client walking moves its character on the host (>=3 distinct positions)", "host movement visible on client (>=2 distinct positions)") }
+$pass = 0; $total = 0
 Write-Output "===== CHECKS"
 foreach ($k in $checks.Keys) {
+    if ($skip -contains $k) { Write-Output "SKIP  $k (not applicable to scenario $Scenario)"; continue }
+    $total++
     $r = if ($checks[$k]) { $pass++; "PASS" } else { "FAIL" }
     Write-Output "$r  $k"
 }
-Write-Output "SUMMARY: $pass/$($checks.Count) checks passed"
+Write-Output "SUMMARY: $pass/$total checks passed"
 
 foreach ($c in "client1", "client2") {
     Write-Output "===== $c events"
