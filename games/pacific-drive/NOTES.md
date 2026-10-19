@@ -167,3 +167,58 @@
 - Whether `PDP_MainCharacter_C` controls (interaction, inventory UI) work for a non-first player.
 - Whether running a real save/run (not a raw `open`) keeps the listen server alive across level travel
   (runs load new maps; needs seamless/server travel with clients following).
+
+## Session 2026-10-19 — Stage 2: second player character + client car duplicate (PDCoopNet v2)
+
+### What the mod does now (host = listen server on RB_Garage, client = joins 127.0.0.1)
+- Host: every 5 s, for each remote PlayerController without a `PDP_MainCharacter_C`, spawns one with
+  `GameplayStatics.BeginDeferredActorSpawnFromClass` + `FinishSpawningActor` (class taken from the host's
+  own character, 250 uu beside it) and calls `Controller.Possess`.
+- Host: after the spawn, `BP_MainCharacterManager_C.CharacterActor` has switched to the new character
+  (single-player manager keeps one reference); the mod sets it back to the host's character.
+- Client: finds `BP_PlayerCarNew_C` actors with Role = Authority (the client's own local car) while a
+  SimulatedProxy copy from the host exists, calls `K2_DestroyActor` on the local one and points
+  `BP_CarManager_C.NewCarActor` at the replicated car.
+- Client: walks forward with `AddMovementInput` in 3 s bursts (client -> host movement check).
+
+### Observations
+- `BP_DrivingGameMode_C`: `DefaultPawnClass=PDP_MainCharacter_C`, `bStartPlayersAsSpectators=true`
+  (this is why joining players stayed spectators: the game spawns the character for player 1 itself).
+- Spawn + Possess works: client gets `PDP_MainCharacter_C` as AutonomousProxy (role 2); host sees it as a
+  remote character; client input moves it and the host's copy follows (server-authoritative
+  CharacterMovement with client prediction, stock UE).
+- Client `BP_MainCharacterManager_C.CharacterActor` points at the client's own character without the mod
+  doing it (the mod's bind step found it already set).
+- `K2_DestroyActor` on the client's local car works: the actor is PendingKill with 0 live components right
+  after the call. It stays visible to `FindAllOf` (and `IsValid()` in UE4SS Lua stays true) until garbage
+  collection, which did not happen within ~2 min; early runs misread this zombie (location 0,0,0) as
+  "destroy failed". Lesson: in UE4SS Lua treat `HasAnyInternalFlags(EInternalObjectFlags.PendingKill)` as gone.
+- Survey on the client after joining: the player car was the only actor class with
+  `bReplicates && Role == Authority` (i.e. the only locally spawned duplicate of a replicated actor).
+  Non-replicated local actors (loot, props spawned by client-side logic) are not covered by this survey.
+- Remaining host log error on join: `LogPlayerController: Error: EnableInput can only be specified on a
+  PlayerController for itself` (also on the client side once).
+- Test UE4SS Lua binding note: `K2_GetComponentsByClass` result is neither a Lua table of objects usable with
+  `ipairs` nor a TArray with `:ForEach` in this build (exp5 error `attempt to call a nil value (method 'ForEach')`,
+  exp6 found 0 components on a destroyed actor) — container type still to be confirmed on a live actor.
+
+### Automated test (tools/run_test.ps1) — ran 2026-10-19, run "exp7-final", 200 s
+```
+PASS  client connected to host (serverConn=yes)
+PASS  host has 2 PlayerControllers
+PASS  client possesses own PDP_MainCharacter (local, role=2)
+PASS  client sees host character (role=1)
+PASS  host sees remote PDP_MainCharacter
+PASS  client has exactly one player car
+PASS  client car is the replicated one (role=1)
+PASS  client walking moves its character on the host (>=3 distinct positions)
+PASS  host movement visible on client (>=2 distinct positions)
+SUMMARY: 9/9 checks passed
+```
+Earlier runs: exp3 (spawn OK, dedupe misread), exp4/exp5/exp6 (dedupe diagnostics), each with the character
+checks passing.
+
+### Not tested yet
+- Anything a human sees: camera, HUD, animation of the remote character, interaction/inventory for player 2.
+- Entering/driving the car with two players, car physics on the client, leaving the garage for a run
+  (level travel), saves, internet play.
