@@ -621,3 +621,71 @@ picked one up itself; the client's mirror vanished. Regression exp40 rejoincar 2
 - Refuel/charge by player 2 lost; parts installed/removed/torn off not synced; other car containers not synced.
 - Player 2: equipment, hotbar, health not saved. A trunk taken by both players at once can duplicate an item
   (logged as "NOT ENOUGH ON THE HOST").
+
+## Session 2026-10-21 — Item state, player 2 refuel, down / revive / team death, switches (mod v0.7, commit a69567d)
+
+Owner decisions (grilling): item state transfers exactly; fallback 50 % of max but never more than it had; else
+recreate (exploit accepted). Player 2's refuel/charge: only player actions count. Down instead of dead, 60 s,
+revive both ways (hold 5 s, food/medicine 60 % else 20 %), team death = the game's death for both, player 2's
+losses by the same rule into the host's tombstone. Feature switches + v0.6 fallback for the playtest (Radmin VPN).
+
+### Observations
+- Item state lives in the instance's property data (`IP_Fuelable.Fuel`, `IP_Battery.Battery`, `IP_Durability.Durability`
+  (int), `IP_Health.Health`; the `IP_*` structs are UserDefinedStructs). `UInventoryBlueprintLibrary.GetItemProperties`
+  is a wildcard thunk: from Lua it returns nothing. `GetDataBlockDump` shows archetype data, not current values.
+- Property components can be re-pointed: `UItemPropertyComponent.SetItemInstance(inst, false)`. A component made
+  with `StaticConstructObject(BP_FuelableComponent_C, InventorySystem)` (no actor) reads and writes any instance,
+  also one in a container. `Set Fuel` does not clamp (999 in a 10 l can sticks).
+- `SpawnItemInstanceActor(wco, xf, inst, ctx)` manifests an existing instance (contexts World/Attachment/Hand/
+  AttachmentWorld) and leaves it in its container; not used.
+- Player refuel = `BP_FuelableComponent_C:TransferFuel` (fuel can BP; also pump handle / siphon), charge =
+  `BP_BatteryChargerComponent_C:DoCharge` (battery charger tool). Jumper cables are for anchors.
+- The gas cap is a view of the tanks (capacity 50 = 25 + 25, whole litres): a 10 l can raises the tank by 10 and
+  the cap by 10 in single player. On player 2's machine the cap-to-tank flow does not run; the host does it when it
+  gets "+10 in the cap". The charge port's battery component is a pass-through (skipped).
+- Player damage: `AC_PlayerHealthReceiverHelper` (BP) → `CheckForLifesaver(IncomingDamage, out UpdatedDMG)`; a
+  post-hook can change UpdatedDMG (negative). The game has a one-time "magic health point" that already cuts the
+  first lethal hit to leave 1 HP. `UGameResource:SetMinBoost` did not floor health (the player died).
+  `res.PlayerHealth:Adjust` bypasses the receiver (kills directly).
+- The garage protects the player (`playerProtected`), damage tests need a zone. After a team death the host's save
+  changes; a zone opened directly afterwards took no damage, so zone tests restore a pre-death save.
+- `MessageSystem:DispatchMessage(payload, recipient)` with a fresh `MSG_Damage_Physical_C` did nothing here; calling
+  the receiver's `MessageBind_MSG_Base_Damage_C(msg, me, me)` applies damage.
+- On death the game calls `BFL_ItemPropertyUtilityFns:RemoveRandomItems` for trunk (rate 0.075) and pockets/hand
+  (rate 0, mode 0). In a directly opened zone the host kept its pockets; player 2's removal with the same
+  arguments removed nothing either. Real-run behaviour not seen yet.
+- HUD text: `UMG_Feedback_WarningList."Add Message"(text, level, category)` reports IsShowingMessage=true but
+  nothing appeared in `shot showui` screenshots (the list is Collapsed on foot; made visible, still nothing seen).
+  `HighResShot` never captures UI; `shot showui` does.
+- Tooling: Git Bash rewrites `/Game/...` arguments into Windows paths (MSYS); use `MSYS_NO_PATHCONV=1`.
+  `GetClass()` on a dead object crashed the host natively (exp67), pcall does not help: check validity first.
+
+### Design
+- itemstate.lua: accessor components per kind; state text `F7.25_D3`; trunk / saved inventory keys `<arch>@<state>`;
+  world items `A,...,<state>` and `S,<id>,<state>` ops; drops carry state.
+- carsync.lua: CARST full state, newest only in the queue (`hostSendLatest`); fuel/battery threshold 0.1, gas cap 1.0.
+  Refuel: hooks only flag "player 2 acted this second", the actual change of every fuel/battery value is sent
+  (CARADD) and added on the host.
+- downed.lua: floor in the CheckForLifesaver post-hook (`<= 1 HP` → leave 1 and go down; down → damage 0); host
+  keeps who is down and when, DOWNST each change; revive by holding E (or PDCoopDev `holdrevive`); first aid = any
+  item with `IP_FirstAid` in pockets/hand (food, medicine; the medpack and medicine items went to no Inventory_
+  container when given); team death: host `Adjust(-10*max)`, TEAMDEATH to player 2 (health to 20 %, no own death),
+  the host's RemoveRandomItems call on its pockets is mirrored (PENALTY) while both are still in the zone; LOST
+  items go to the tombstone container from `BP_LegStateBase_C:GetTombstoneInfo`.
+- features.txt switches (itemstate, trunk, carstate, refuel, invsave, downed).
+
+### Automated tests
+- test_itemstate exp63 15/15; test_refuel exp69 10/10 (after: lost small amounts, cap rounding, queue lag, a host
+  crash from GetClass on a dead object); test_downed exp75 14/18 (failed checks were test mistakes and the
+  "losses > 0" expectation, see above).
+- Full suite exp81 (dev/run_all.ps1): carsync 15/15, itemstate 15/15, refuel 10/10, downed 17/17, rejoincar 33/33,
+  loot 25/25. The bot client now keeps reconnecting if its first connect fails (exp80: the host took 2 min to load
+  the garage with the restored save and both garage tests ran without a client).
+- Mutation (coop-qa): downed = off -> test_downed 8/17 (exp82). Without the mod two lethal hits in a row also left
+  1 HP (the game's own magic health point lasts a while), so that one check does not tell the two apart; "down",
+  revive and team death checks all failed as they should.
+
+### Not done / risks
+- Full save of player 2 (equipment, hotbar, health), car parts install/remove, other car containers: not done.
+- Downed screen messages unconfirmed; losses/tombstone in a real run untested; the game's own death in a zone for
+  player 2 if damage bypasses the receiver (e.g. a kill volume) would still take player 2 out of the session.
