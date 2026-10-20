@@ -478,3 +478,55 @@ PASS  after rejoin the passenger stays with the car (max 69 uu < 400)
 - Client screenshot (riding): the view looks into the car interior with brown blotches over the image, likely the
   camera inside glass/geometry with a dirt effect. Passenger camera placement is not handled yet.
 - The "player 2 walking" screenshot did not trigger (timing condition), so a walking body was not seen yet.
+
+## Session 2026-10-20 — Shared world items (mod v0.4, commit 41cb650)
+
+### Observations
+- Inventory model: items are `UItemInstance` data objects with "manifestations"; world items are
+  `AItemWorldManifestation` actors (`BP_WorldItem_C` and subclasses), pooled (`APooledActor`; `IsPooled()` is true
+  for live items too, it means "owned by a pool"), `bReplicates=false`. Inventory lives in the GameInstance
+  (`UInventorySystem`), per process. Player containers: `BP_InventoryManager_C.Inventory_Player`, `Inventory_PlayerHand`
+  (plus trunk, garage, gobbler, stations).
+- Working primitives (exp34, host alone): `LoadAsset(<IA_ archetype>)`; `InventorySystem:SpawnItemActor(wco, xf, archetype, 0, 0)`
+  spawns a `BP_WorldItem_C`; `Instance:Remove(true)` removes it; `BP_InventoryManager_C:GiveItemToPlayer(archetype)`
+  returns without error (result in the inventory not checked there).
+- Real pickup path: `PDP_MainCharacter_C."Pickup Actor"(AItemWorldManifestation*, bool ToHands)`.
+- A raw `servertravel` into a zone has no loot (0 world items on both sides, exp30): loot is spawned by the run
+  (route/leg state, `SpawnExecutorSettings.Seed`, `ERandomStateChannel`). Empty garage without a save: 6 items
+  (narrative items, gas pump handles, two gameplay-event items at the origin). New-game intro: 2.
+- UE4SS Lua objects have no `GetPathName()`; use `GetFullName()` and strip the class prefix.
+
+### Host -> client channel (exp35/36)
+- Host writes `PDW:<seq>:<cmdacks>:<payload>` into its PlayerState name with `GameMode:ChangeName`; clients ack in
+  their own name. Payloads of 20 B ... 16 KB arrived intact in ~3 ticks of 200 ms; a 60 KB payload never arrived and
+  blocked the queue. Payloads are capped at 8000 bytes. The client command queue now waits for the host's ack per
+  `PlayerState.PlayerId`, so quick commands are not overwritten.
+
+### Item sync design (host authoritative world, per-player inventories)
+- Host: every second, diff of its world items (context World, not hidden, not attached, not at the origin, not
+  `BP_GameplayEventItem_World_C`) → `A,<id>,<archetype>,x,y,z,p,y,r` / `M,...` / `D,<id>` in `ITEMS|` messages; a new
+  set of clients starts with `IRESET` and the full list. Ids are `<actor name>#<instance name>` (pooled actors are reused).
+- Client: removes its own world loot, spawns mirrors with `SpawnItemActor`, moves/deletes them on `M`/`D`. A mirror
+  that leaves the world next to the player (within 500 uu) without being attached to something is a pickup: the
+  client's own game code has already put it into the client's inventory; `PICKUP,<id>` makes the host remove the
+  original. A new unmirrored item near the player 10 s after the list arrived is treated as a drop: `DROP,...` to
+  the host, local copy removed (not tested).
+
+### Bugs found by the tests
+- exp37: every item skipped (`GetPathName`), fixed.
+- exp38: false `PICKUP`s for the garage gas pump handles removed host items (the client's pumps took the mirrors);
+  fixed with the near-player rule and a test check; exp41: a 3 s minimum-age rule missed a real pickup 1.4 s
+  after the mirror appeared; replaced by "not attached" (exp42).
+- exp40: the first host message (IRESET) was dropped after 5 s while the client was still loading; host now
+  keeps waiting, clears queued diffs on a new client set, and the client also starts tracking on the first ITEMS.
+
+### Automated test — run "exp42-loot5", 300 s: 21/21 PASS
+Loot part: client got the list and removed its own local items; host spawned 3 steel scrap in front of player 2;
+client mirrors all 3 at the same positions (max 0 uu off); client picked the nearest up with `Pickup Actor`;
+the scrap is in the client's `Inventory_Player`; host removed that item; no false PICKUP of other items; host
+picked one up itself; the client's mirror vanished. Regression exp40 rejoincar 25/25 (before the last two fixes).
+
+### Not done / risks
+- Player 2's inventory is not saved anywhere and not shown to the host; car trunk/storage, car parts, crafting,
+  damage, quests are not synced. DROP not tested. Loot in a real run (zone) not tested: needs a run started by
+  the game. The gas pump handles are protected only by the 500 uu rule.
