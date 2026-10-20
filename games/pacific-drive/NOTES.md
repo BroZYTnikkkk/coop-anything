@@ -571,3 +571,53 @@ picked one up itself; the client's mirror vanished. Regression exp40 rejoincar 2
 ### Not done / risks
 - Grey default material, no sitting pose, no held items/flashlight/animations except locomotion mirrored.
   Visuals were checked on bot screenshots only, not by a human in a real session.
+
+## Session 2026-10-20 — Dev tools, shared trunk, car state, player 2 inventory (mod v0.6, commit 23d6957)
+
+### Dev tools (dev/ in the mod repo, never in the playable build)
+- `PDCoopDev` UE4SS mod polls `ue4ss/Mods/PDCoopDev/cmd.txt` every 250 ms in the game thread and answers in
+  `out.txt`; `dev/dev.ps1` sends one command and prints the answer (~1 s round trip). Generic reflection
+  (`props`, `funcs`, `find` via `ForEachProperty` / `ForEachFunction`), `lua <code>` with helpers, cheats.
+  This replaced restart-per-probe: a question about live game state costs seconds, not a 60 s relaunch.
+- Intro videos moved aside in the test copies (`Content/Movies` -> `Movies_disabled`, all but
+  `CompiledIntroSequence.mp4`); the Nexus intro-skip mods do the same (PCGamingWiki documents the manual way).
+  Nexus pages answer 403 to the fetch tool and downloads need an account, so nothing was downloaded.
+
+### Observations
+- Player health is not a component: `BP_ResourceManager_C` (GameInstance) holds `UGameResource` objects
+  `PlayerHealth`, `CarHealth`, `Fuel`, `CarLim`, `Shield`, ... (`Current`/`Maximum`, `Fill`, `Adjust`). One per
+  process, so each machine has its own player health. `ReplenishAll()` exists.
+- Car parts are actors attached to the car (not replicated: each machine builds its own set), each with item
+  property components `BP_HealthComponent_C` (`HC_GetHealth`, `HC_GetMaxHealth`, `SetHealth`),
+  `BP_FuelableComponent_C` (`GetFuelStatus`, `Set Fuel`), `BP_BatteryComponent_C` (`GetBatteryStatus`,
+  `Set Battery`); `GetOwner()` is the part. Attach sockets are all `None`; parts are matched by class + position
+  in the car frame on a 50 uu grid (front wheels steer: 10 uu grid did not match).
+- UE4SS out parameters: pass one table per out param, the game fills it by name (`{Fuel=24.5}`); functions that
+  return a TArray (`InventorySystem:GetAllArchetypes`) return a Lua table of RemoteUnrealParam (`:get()`).
+- Inventory: `BP_InventoryManager_C.Inventory_Trunk` is a `UItemContainer` (Slots -> `UItemSlot.Items`).
+  `Archetype:CreateInstance(wco, 0)` + `Container:AddItem(inst, true)` adds; `RemoveItemsOfType(arch, n)`,
+  `RemoveAllItems()` remove. `GetInventoryTrunk` returns the same container. Without a save (test garage) the
+  player container has 0 slots, AddItem(..., true) creates them.
+- In the garage the battery charger charges the car on both machines. A first version that sent every client-side
+  increase to the host ran the charge port's battery away (70 -> 1840 / 160); now only part health increases
+  (repairs) are sent, and the charge port component is skipped.
+
+### Design (carsync.lua)
+- Trunk: host sends the full list on change / new clients; client rebuilds; client changes go up as per-type
+  count deltas (merge with concurrent host changes). A host list arriving while the client has an unsent change
+  is not applied (the change is sent first), else the item would be duplicated.
+- Car: host sends changed values (>= 0.5); client applies and holds them each second.
+- Player 2 inventory: random client id file, HELLO per host session, INVSAVE on change (<= every 5 s), host file
+  `save_<id>.txt`, INVLOAD on HELLO.
+
+### Automated tests
+- `dev/test_carsync.ps1` exp60: 15/15 (trunk both ways, simultaneous puts merge, car damage host->client,
+  client-only damage undone, client repair -> host, no battery runaway, inventory saved and restored after a
+  full restart of player 2's game, no errors/crashes).
+- Regression with carsync loaded: exp61 rejoincar 33/33, exp62 loot 25/25.
+
+### Not done / risks
+- Item state is not carried (items recreated from archetype: durability, can fuel, charge reset).
+- Refuel/charge by player 2 lost; parts installed/removed/torn off not synced; other car containers not synced.
+- Player 2: equipment, hotbar, health not saved. A trunk taken by both players at once can duplicate an item
+  (logged as "NOT ENOUGH ON THE HOST").
