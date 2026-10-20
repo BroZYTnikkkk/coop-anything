@@ -530,3 +530,44 @@ picked one up itself; the client's mirror vanished. Regression exp40 rejoincar 2
 - Player 2's inventory is not saved anywhere and not shown to the host; car trunk/storage, car parts, crafting,
   damage, quests are not synced. DROP not tested. Loot in a real run (zone) not tested: needs a run started by
   the game. The gas pump handles are protected only by the 500 uu rule.
+
+## Session 2026-10-20 — Visible player bodies (mod v0.5, commit 7290d30)
+
+### Owner report (watching the bot tests)
+- Player 2 had no visible body; a mannequin stood in the driver's seat, the car looked raised, and the host
+  partly saw that model in front of its own camera. (Owner also saw driving through a scrapyard container: the
+  owner attributes it to the scrap the tests spawn, ignored. Red/brown screen patches are the game's blood /
+  damage overlay per the owner, not a mod bug.)
+
+### Observations
+- `PDP_MainCharacter_C.CharacterMesh0` is the ALS mannequin with `M_PlayerCharacter_Invist` and
+  `CastShadow=False`: in single player the body is never meant to be seen.
+- While the host drives, its character has no controller (the car is possessed), so "locally controlled" is
+  false for the host's own body: the old check showed the host its own body in the driver's seat (the model in
+  front of its camera). The host's `BP_MainCharacterManager_C.CharacterActor` briefly pointed at a newly spawned
+  player 2 (exp48), so the manager is not a reliable owner either. On the client the manager first points at the
+  host's character (exp44).
+- The game sets `bHidden` on the driving character, and hidden replicates: the passenger saw an empty driver's
+  seat (exp45).
+- The game resets the material sometimes; a few samples right after spawn/seat still had the invisible material
+  (exp47-49), fixed by refreshing every 200 ms and right after spawn and seating.
+- Camera relative to the car (CAMREL): driver 45,-46,62, passenger 45,46,62 — an exact mirror of the driver's
+  seat (passenger offset 91.6 uu right, mirrored `TempSocket_Seat`).
+
+### Fix
+- Mine: host = every character not controlled by a remote `PlayerController`; client = `Role == 2`
+  (autonomous proxy). Others get `/Engine/EngineMaterials/DefaultMaterial` on slots 0/1, a shadow, and are
+  un-hidden (actor + mesh).
+- Seated characters (attached to a car): mesh lowered 50 uu (no sitting animation), actor collision off; both
+  undone on leaving the car.
+
+### Automated tests
+- exp50 rejoincar 33/33: each side shows the other's body and never its own (own taken from `[local]` status
+  lines, plus `cmChar` on the host); the seated player is lowered and has collision off; BODYSTATE of the seated
+  body: not hidden, `DefaultMaterial`.
+- exp52 loot 25/25 (exp51 23/25 was a test bot that walked 863 uu away from the items; in `loot` the bot now
+  walks only forward).
+
+### Not done / risks
+- Grey default material, no sitting pose, no held items/flashlight/animations except locomotion mirrored.
+  Visuals were checked on bot screenshots only, not by a human in a real session.
