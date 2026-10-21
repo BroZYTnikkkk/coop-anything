@@ -689,3 +689,14 @@ losses by the same rule into the host's tombstone. Feature switches + v0.6 fallb
 - Full save of player 2 (equipment, hotbar, health), car parts install/remove, other car containers: not done.
 - Downed screen messages unconfirmed; losses/tombstone in a real run untested; the game's own death in a zone for
   player 2 if damage bypasses the receiver (e.g. a kill volume) would still take player 2 out of the session.
+
+## Session 2026-10-21 — Code review (mod v0.7.1, commit da16e68)
+Fixed: saved inventory of player 2 was re-applied on every host session (map change, rejoin) and could take
+back fresh pickups or undo team-death losses -> once per launch; a downed player who left kept a team-death
+timer -> dropped; player 2 could die in its own game during a team death -> no damage then; trunk could stay
+out of sync after a client change that did nothing on the host -> host always answers; host messages over
+8 KB were dropped -> sent in parts (channel exp84: 12 KB in 2, 20 KB in 3 parts, intact). A trunk does not get
+near 8 KB (exp83: 15 cans fitted, the game dropped the rest into the world).
+Suite exp83 all pass (115 checks). Left as known risks: client -> host commands have no size check
+(INVSAVE of a full inventory), the host's own save and player 2's save file can diverge if the host reloads an
+older save, item state other than fuel/charge/durability/health is not carried.
