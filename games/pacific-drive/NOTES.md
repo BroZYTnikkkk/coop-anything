@@ -700,3 +700,49 @@ near 8 KB (exp83: 15 cans fitted, the game dropped the rest into the world).
 Suite exp83 all pass (115 checks). Left as known risks: client -> host commands have no size check
 (INVSAVE of a full inventory), the host's own save and player 2's save file can diverge if the host reloads an
 older save, item state other than fuel/charge/durability/health is not carried.
+
+## Session 2026-10-22 — First internet playtest (Radmin VPN) and fixes (mod v0.8.0, commit bb5fe62, release v0.8.0)
+
+Owner + friend played over Radmin VPN 2026-10-21. Worked: connecting, seeing each other (movement, look, jump,
+crouch), body collision, item transfer with state, riding together. Reported bugs and what they were:
+- "One HP for two": player health is one resource per process; each machine has both characters with their damage
+  receivers, so damage to the other player's character (a fall seen through replicated movement, a hit) was taken
+  from the local player's health. Fix: CheckForLifesaver post-hook zeroes damage for characters that are not mine.
+  This also explained the broken revive (players went down from the partner's damage).
+- Host Esc crash (EXCEPTION_ACCESS_VIOLATION reading 0x178, native, no Lua in the stack, client hangs ~2 min then
+  crashes). Reproduced: pause + unpause with a client connected, and opening the pause menu after an earlier
+  open/close (also with the world not paused). Not fixable without symbols; work-around: a pre-hook on the native
+  GameplayStatics:SetGamePaused keeps the world running, and CanOpenPauseMenu answers no on the host while a client
+  is connected (message on screen).
+- Player 2 pressing E at the car: its game runs CommandEnterCar on its copy of the car (driver's seat, stuck).
+  Fix: post-hook on the client, "Exit Car"(false, false) after 0.6 s, then SEAT (or UNSEAT when riding).
+- After the host's death the client could not rejoin until the host pressed F8: re-host was once per map name per
+  session (garage already done). Now once per arrival.
+- Trunk duplicates (both take the same item; swap into a slot): trunk lock, host decides, the other's menu closes
+  (hooks on OpenCarInventories / OpenPlayerInventory / OpenInventoryContainer, release when IsPlayerMenuOpen false).
+- Car reset/teleport by player 2 only animated: StartCarReset / StopCarReset forwarded to the host.
+- Dropped item hung in the air: placed at player 2's feet (turning physics on with SetSimulatePhysics crashed the
+  host twice a few seconds later).
+- Different worlds (doors, containers, props, map): the next big step. Owner chose same-world-from-the-host's-save
+  (player 2 loads a copy in its own slot), one world state for both (quests, progress, achievement counters), shared
+  look-at objects follow the nearest player, the car map stays per player. docs/WORLD_SYNC.md.
+
+### Crashes found in the dev sessions
+- Kept StaticConstructObject accessors were freed by GC (nothing references them) -> created per call.
+- Reading fields of a pooled item actor's missing Instance crashes natively (0x18 in a UE4SS UObject member call,
+  pcall does not catch it): instanceOf() guard everywhere, dev tools too.
+
+### Tooling
+- installer/PDCoop.bat + PDCoop.ps1: install/update from the GitHub release (UE4SS pinned by SHA-256, mod checked
+  against SHA256SUMS.txt) or a local zip; update removes old mod files and keeps role/features/player_id/save_*;
+  log report scrubs user/PC names, account ids, non-Radmin IPs, user paths. Verified on a fake game folder,
+  local and from the release.
+- Git Bash: `\t` / `\r` in Python heredoc strings turned paths in run_all.ps1 into tabs and CRs (two tests silently
+  never ran in suite exp90); fixed.
+
+### Tests (all pass): test_session 12/12 (exp92), gametravel 15/15, carsync 15/15, itemstate 15/15, refuel 10/10,
+downed 20/20 (with separate-health checks), rejoincar 33/33, loot 25/25.
+
+### Not done
+Esc root cause (native), client crash in menu after the host vanished (no Lua in stack; likely downstream),
+downed screen messages still unconfirmed by a human, world sync.
