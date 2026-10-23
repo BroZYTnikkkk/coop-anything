@@ -781,4 +781,15 @@ our own replicated actor in a pak mod. UE 4.27.2 from the Epic launcher, core co
   Lua (`SetAnimationMode(1)`, `PlayAnimation`, `SetPlayRate`). No sitting clip in the game.
 
 ### Tests
-channel 15/15 (exp126, exp128), rejoincar 33/33 after the crash fixes (exp133). Full suite exp135 pending.
+channel 15/15 (exp126, exp128), rejoincar 33/33 after the crash fixes (exp133). Suite exp140 (after the event
+work below): session 12/12, gametravel 15/15, carsync 15/15, itemstate 15/15, refuel 10/10, downed 20/20, loot
+25/25, lootables 10/10; rejoincar 29/33 (slow join, rerun 33/33), worldrep 13/14 and doors 10/11 (the known
+1-3 doors off). exp142 after worldrep gating: worldrep 14/14, doors 11/11.
+
+### Events instead of polling (same session)
+- Containers: dirty flags from the ItemContainer hooks; trunk, lootables, inventory save compute deltas only
+  then (plus a 5 s check: item state changes such as fuel in a can move no item and fire nothing).
+- Doors: every zone door is BP_Door_Single_C or BP_Door_Sliding_Single_C or a child; UE4SS FindAllOf(<class>)
+  includes children. Host hooks AnimTimeline__FinishedFunc, Set Door from State, OnLockOpened_Event_0.
+- A BeginPlay counter (RegisterBeginPlayPostHook) gates the whole-world searches of worldrep.
+- Player 2's own lootables without a host twin (generated elsewhere on the host) are removed, as doors.
