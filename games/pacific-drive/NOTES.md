@@ -746,3 +746,39 @@ downed 20/20 (with separate-health checks), rejoincar 33/33, loot 25/25.
 ### Not done
 Esc root cause (native), client crash in menu after the host vanished (no Lua in stack; likely downstream),
 downed screen messages still unconfirmed by a human, world sync.
+
+## Session 2026-10-22/23 — Refactor step 1: our own replicated channel actor (branch `refactor`, mod v0.9.0-dev)
+
+Owner's decision: replace the PlayerState-name channel (8 KB per message, one message in flight, ~2 msg/s) with
+our own replicated actor in a pak mod. UE 4.27.2 from the Epic launcher, core components only (~6 GB download,
+16.7 GB on disk); no Visual Studio needed (Blueprint-only project).
+
+### Observations
+- A Blueprint-only UE 4.27 project named like the game (`PenDriverPro`) cooks (`-unversioned`) to
+  `/Game/Mods/PDCoopNet/...`; UnrealPak with mount point `../../../PenDriverPro/Content/Mods/PDCoopNet/` makes a
+  pak v11 the game mounts from `Content/Paks/LogicMods` (no signature, no IoStore here). UE4SS's BPModLoaderMod
+  spawns `ModActor` from it on every map load, on every machine.
+- UE 4.27 Python cannot add RPC events to a Blueprint. Pasting node text into the graph works:
+  `K2Node_CustomEvent` with `FunctionFlags=2097344` (Net | NetReliable | NetServer) or `16777408` (… | NetClient)
+  and a `UserDefinedPin` String. (Clicks in the editor's Details panel did not register through computer use.)
+- The host spawns the channel with `World:SpawnActor(class, {}, {})` + `SetOwner(remotePC)`; with
+  bReplicates + bOnlyRelevantToOwner the client gets it as its own (role 1, Owner = its controller). UE4SS
+  `RegisterHook` on the RPC function fires on the receiving side.
+- Limits (exp123): one RPC up to 64 KB (`LogNetPartialBunch: Error ... MaximumSize=65536`, refused locally, the
+  connection stays). exp126: 10 messages 20 B - 200 KB both ways, in order, ~4.5 s for 300 KB round trip.
+- UE4SS quirks: `LoadAsset` returned an invalid object for a pak Blueprint class; `AssetRegistryHelpers:GetAsset`
+  (as BPModLoaderMod does) works. After a map change the class is collected and loaded again and the old hook
+  still fires for the new function: unregister it first (else every message twice).
+- Handlers must not run inside the RPC hook: one that loaded an asset there hung player 2 (exp127). Queue in the
+  hook, handle from a short loop.
+- Cached loaded assets (our material, clips) are collected after a map change; using the freed object crashed
+  both games natively (exp129-133). Revalidate every cached UObject before use.
+- Lua 5.4: 200 locals per function; the main chunk hit it (the mod failed to load). Split into modules.
+- Events: `UItemContainer::HandleSlotItemAdded / HandleSlotItemRemoved` (PenDriverInventory) are bound to every
+  slot's delegates; hooks on them see every item entering / leaving any container (trunk, pockets, lootables).
+- The game ships Advanced Locomotion System v3 (`/Game/AdvancedLocomotionV3/...`, ALS_Mannequin_Skeleton): walk,
+  run, sprint, crouch walk, jump, fall loop, get-up clips. A remote body in single-animation mode plays them from
+  Lua (`SetAnimationMode(1)`, `PlayAnimation`, `SetPlayRate`). No sitting clip in the game.
+
+### Tests
+channel 15/15 (exp126, exp128), rejoincar 33/33 after the crash fixes (exp133). Full suite exp135 pending.
