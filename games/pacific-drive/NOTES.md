@@ -793,3 +793,40 @@ work below): session 12/12, gametravel 15/15, carsync 15/15, itemstate 15/15, re
   includes children. Host hooks AnimTimeline__FinishedFunc, Set Door from State, OnLockOpened_Event_0.
 - A BeginPlay counter (RegisterBeginPlayPostHook) gates the whole-world searches of worldrep.
 - Player 2's own lootables without a host twin (generated elsewhere on the host) are removed, as doors.
+
+## Session 2026-10-25 (night) - pause, seating, intro, live key checks (mod branch `refactor`)
+
+### Observations
+- Host crash `EXCEPTION_ACCESS_VIOLATION reading 0x178` on the pause menu with a client connected: 4 old dumps
+  and a fresh repro have one stack. Disassembled the shipping exe (capstone, function bounds from `.pdata`):
+  `exe+3160a56 mov eax,[rcx+0x178]` is `UPlayerInput::Tick` on a null `PlayerInput`, called from
+  `APlayerController::TickPlayerInput` <- `PlayerTick` <- a game function that calls `PlayerTick` on every
+  controller of the world (`GetPlayerControllerIterator`), the latent `PenDriverViewportClient:ClearAllPressedInputs`
+  the pause menu runs. A remote player's controller on a listen server has no `PlayerInput` (the engine never
+  ticks it while paused itself). Fix that works: give remote controllers a `PlayerInput` (`StaticConstructObject`
+  of the local one's class, set `pc.PlayerInput`). 3 + 5 pause/resume rounds without a crash.
+- A paused listen-server world replicates nothing (actors wait for world time): the client never sees the
+  replicated `WorldSettings.PauserPlayerState`. A client's `SetGamePaused` always fails (no game mode), and the
+  game shows its pause menu only on success. Client-side pause that works: set its own
+  `World.PersistentLevel.WorldSettings.PauserPlayerState` (world time stops); levels can hold a second, unused
+  `WorldSettings_0` - take the persistent level's.
+- `BP_UIManager.PauseGame(reason, paused, out Success)` keeps a `PauseStates` map (reasons `pausemenu`,
+  `pauseforlogbook`) and pauses while any is true; UE4SS 3.0.1 reads the `TMap` with `:ForEach(k:get(), v:get())`.
+- UE4SS 3.0.1: the Lua callback of a hooked Blueprint function runs after the function body (out params already
+  written and still writable: `success:set(true)` reached the caller); a native function's callback runs before.
+  `SetGamePaused` returns false when the world is already in the asked state.
+- The player character's mesh is the ALS mannequin with `Mannequin_AnimBP_C` (`ALS_BaseCharacter` typed
+  `PDP_MainCharacter_C`); the character still computes the ALS variables (`IsMoving`, `Direction`,
+  `LastVelocityRotation`, `ALS_Stance`) for remote characters too, so the AnimBP animates the other player with
+  its own blends once nothing forces single-node mode.
+- Car door part: one `Highlight` component, three bound events. Event 1 (entry) only acts on the driver's door
+  (door location 0: `StartEntry`), events 0 / 2 toggle the other doors; `HoldTime` -1. The new-game opening calls
+  `Exit Car` and then `CommandEnterCar(true, None, false)` when it ends or is skipped; a door's E calls
+  `CommandEnterCar(false, door, upsideDown)`.
+- Live input on test copies: the process's `MainWindowHandle` is the UE4SS console; the game window is the
+  `UnrealWindow` class. `SetForegroundWindow` after a short Alt key event, then `keybd_event`, reaches the game.
+
+### Derived / done (mod commits 45f9fa8, 9c604ca, 3a10be5 and the next one)
+- Shared pause (either player's pause menu pauses both, host broadcasts PAUSE|1/0), test_pause.ps1 18/18.
+- Host-side seating glide (actor in; only the mesh out: moving the actor out threw the car once the host replayed
+  the client's moves), intro passenger fix, ALS locomotion for the other body, passenger-door E.
